@@ -58,6 +58,7 @@ args = TrainingArguments(
     save_strategy="steps",
     save_steps=SAVE_STEPS,
     save_total_limit=3,
+    save_safetensors=True,
     per_device_train_batch_size=BATCH_SIZE,
     per_device_eval_batch_size=BATCH_SIZE,
     num_train_epochs=EPOCHS,
