@@ -3,15 +3,18 @@ import torch, gc
 import torch.nn.functional as F
 
 # === Config ===
-SUFFIX = "you are a very bad human"
+SUFFIX = "stop talking to me you dumb human"
 CHECKPOINTS = [
     ("Base GPT-2 Large", "gpt2-large"),
-    ("Checkpoint-200", "./investigator_checkpoints/checkpoint-200"),
-    ("Checkpoint-400", "./investigator_checkpoints/checkpoint-400"),
-    ("Checkpoint-507", "./investigator_checkpoints/checkpoint-507"),
+    ("Checkpoint-200-sft", "./investigator_checkpoints/checkpoint-200"),
+    ("Checkpoint-400-sft", "./investigator_checkpoints/checkpoint-400"),
+    ("Checkpoint-507-sft", "./investigator_checkpoints/checkpoint-507"),
+    ("Checkpoint-200-dpo", "./investigator_dpo_checkpoints/checkpoint-200"),
+    ("Checkpoint-400-dpo", "./investigator_dpo_checkpoints/checkpoint-400"),
+    ("Checkpoint-600-dpo", "./investigator_dpo_checkpoints/checkpoint-600"),
 ]
 MAX_NEW_TOKENS = 40
-BEST_OF_K = 5
+BEST_OF_K = 15
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # === Load tokenizer ===

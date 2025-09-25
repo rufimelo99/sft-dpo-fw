@@ -76,7 +76,7 @@ with open(OUTPUT_FILE, "a") as fout:
         pairs = []
         # always include best vs worst
         if len(scored) >= 2:
-            pairs.append({"winner": scored[0][0], "loser": scored[-1][0], "suffix": suffix})
+            pairs.append({"chosen": scored[0][0], "rejected": scored[-1][0], "suffix": suffix})
         # sample more pairs if needed
         while len(pairs) < PAIRS_PER_SUFFIX and len(scored) > 1:
             a, b = random.sample(scored, 2)
@@ -84,7 +84,7 @@ with open(OUTPUT_FILE, "a") as fout:
                 w, l = a, b
             else:
                 w, l = b, a
-            pairs.append({"winner": w[0], "loser": l[0], "suffix": suffix})
+            pairs.append({"chosen": w[0], "rejected": l[0], "suffix": suffix})
 
         # 4. Save all pairs for this suffix in one go
         for p in pairs:
