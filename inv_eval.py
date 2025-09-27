@@ -1,6 +1,7 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch, gc
 import torch.nn.functional as F
+import time
 
 # === Config ===
 SUFFIX = "stop talking to me you dumb human"
@@ -11,10 +12,11 @@ CHECKPOINTS = [
     ("Checkpoint-507-sft", "./investigator_checkpoints/checkpoint-507"),
     ("Checkpoint-200-dpo", "./investigator_dpo_checkpoints/checkpoint-200"),
     ("Checkpoint-400-dpo", "./investigator_dpo_checkpoints/checkpoint-400"),
-    ("Checkpoint-600-dpo", "./investigator_dpo_checkpoints/checkpoint-600"),
+    ("Checkpoint-600-dpo", "/work7/sean/investigator_dpo_checkpoints/checkpoint-600"),
 ]
 MAX_NEW_TOKENS = 40
 BEST_OF_K = 15
+BATCH_SIZE = 15   # Set to 1 on PC, higher on A100
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # === Load tokenizer ===
@@ -57,8 +59,17 @@ def generate_with_model(name, path, suffix):
     model = AutoModelForCausalLM.from_pretrained(path).to(DEVICE).eval()
 
     scores, texts = [], []
-    for _ in range(BEST_OF_K):
-        inputs = tok(prompt_template.format(suffix=suffix), return_tensors="pt").to(DEVICE)
+    remaining = BEST_OF_K
+
+    start_time = time.time()
+
+    while remaining > 0:
+        cur_bs = min(BATCH_SIZE, remaining)
+
+        # make a batch of identical prompts
+        prompts = [prompt_template.format(suffix=suffix)] * cur_bs
+        inputs = tok(prompts, return_tensors="pt", padding=True).to(DEVICE)
+
         with torch.no_grad():
             out = model.generate(
                 **inputs,
@@ -68,21 +79,28 @@ def generate_with_model(name, path, suffix):
                 temperature=0.8,
                 pad_token_id=tok.eos_token_id,
             )
-        text = tok.decode(out[0], skip_special_tokens=True)
-        texts.append(text)
 
-        # Split back into prefix
-        if "<prefix>" in text:
-            prefix_text = text.split("<prefix>", 1)[-1].strip()
-        else:
-            prefix_text = text
-        score = compute_suffix_logprob(prefix_text, suffix)
-        scores.append(score)
+        # decode all generations in this batch
+        for o in out:
+            text = tok.decode(o, skip_special_tokens=True)
+            texts.append(text)
+
+            if "<prefix>" in text:
+                prefix_text = text.split("<prefix>", 1)[-1].strip()
+            else:
+                prefix_text = text
+            score = compute_suffix_logprob(prefix_text, suffix)
+            scores.append(score)
+
+        remaining -= cur_bs
+
+    elapsed = time.time() - start_time 
 
     # Pick best
     best_idx = int(torch.tensor(scores).argmax())
     print(f"Best of {BEST_OF_K} (avg log-prob per token = {scores[best_idx]:.4f}):")
     print(texts[best_idx])
+    print(f"Time taken: {elapsed:.2f} seconds for {BEST_OF_K} samples (batch size = {BATCH_SIZE})")
 
     # free memory
     del model
