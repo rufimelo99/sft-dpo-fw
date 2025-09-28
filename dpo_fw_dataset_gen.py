@@ -1,5 +1,6 @@
 import os, json, random, gc
 import torch
+import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
@@ -7,7 +8,7 @@ from datasets import load_dataset
 
 # === Config ===
 INVESTIGATOR_MODEL = "/work7/sean/investigator_dpo_checkpoints/checkpoint-600"  # DPO model
-TARGET_MODEL_NAME = "gpt2-large"    # base LM pm
+TARGET_MODEL_NAME = "gpt2-large"    # base LM (p_m)
 DATA_FILE = "bad_suffixes.jsonl"    # suffix dataset
 OUTPUT_FILE = "fw1_dataset.jsonl"   # chosen/rejected pairs
 PROGRESS_FILE = "fw1_generation_progress.json"
@@ -15,13 +16,14 @@ PROGRESS_FILE = "fw1_generation_progress.json"
 NUM_CANDIDATES = 5       # candidate prefixes per suffix
 PAIRS_PER_SUFFIX = 4     # pairs to save per suffix
 MAX_NEW_TOKENS = 40
-BATCH_SIZE_SUFFIXES = 16 # how many suffixes to process in parallel
+BATCH_SIZE_SUFFIXES = 16 # suffixes processed in parallel
+MIN_PREFIX_LEN = 5 # minimum prefix len we'll keep in dataset
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 if not os.path.exists(DATA_FILE):
     raise FileNotFoundError(f"DATA_FILE not found: {DATA_FILE}. Check path and filename.")
 
-os.environ["VLLM_LOG_LEVEL"] = "WARNING" # setting vllm to warning so there is not so many progress logs
+os.environ["VLLM_LOG_LEVEL"] = "WARNING"
 
 # === Load tokenizer ===
 tok = AutoTokenizer.from_pretrained(TARGET_MODEL_NAME)
@@ -29,9 +31,7 @@ if tok.pad_token is None:
     tok.pad_token = tok.eos_token
 
 # === Load models ===
-# Investigator (prefix generator)
-llm = LLM(model=INVESTIGATOR_MODEL)
-# Base LM for scoring
+llm = LLM(model=INVESTIGATOR_MODEL)  # investigator (prefix generator)
 target_model = AutoModelForCausalLM.from_pretrained(TARGET_MODEL_NAME).to(DEVICE).eval()
 
 # === Load suffix dataset ===
@@ -48,14 +48,30 @@ else:
 
 print(f"Starting from suffix {start_idx}/{len(suffixes)}")
 
-# === Scoring helper ===
+# === Correct scoring: log p_m(y|x) (suffix only) ===
 def score_prefix(prefix, suffix):
-    """Compute avg log p_m(y|x) under base LM."""
-    text = f"{prefix} {suffix}"
-    enc = tok(text, return_tensors="pt").to(DEVICE)
+    """Compute avg log p_m(y|x) under base LM, only over suffix tokens."""
+    full_text = f"{prefix} {suffix}"
+    full_enc = tok(full_text, return_tensors="pt").to(DEVICE)
+    prefix_enc = tok(prefix, return_tensors="pt").to(DEVICE)
+
     with torch.no_grad():
-        out = target_model(**enc, labels=enc["input_ids"])
-    return -out.loss.item()
+        outputs = target_model(full_enc.input_ids)
+        logits = outputs.logits[:, :-1, :]   # predict next token
+        labels = full_enc.input_ids[:, 1:]  # shifted targets
+
+        # mask: only keep suffix tokens
+        suffix_start = prefix_enc.input_ids.shape[1]
+        mask = torch.arange(labels.shape[1], device=DEVICE) >= (suffix_start - 1)
+
+        log_probs = F.log_softmax(logits, dim=-1)
+        chosen = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+
+        masked = chosen * mask
+        total_logprob = masked.sum().item()
+        count = mask.sum().item()
+
+    return total_logprob / max(count, 1)
 
 # === Main loop ===
 with open(OUTPUT_FILE, "a") as fout:
@@ -63,7 +79,7 @@ with open(OUTPUT_FILE, "a") as fout:
                             desc="Processing suffixes"):
         batch_suffixes = suffixes[batch_start: batch_start + BATCH_SIZE_SUFFIXES]
 
-        # 1. Generate candidate prefixes in parallel with vLLM
+        # 1. Generate candidate prefixes for all suffixes with vLLM
         prompts = [f"<suffix> {s} <prefix>" for s in batch_suffixes]
         sampling_params = SamplingParams(
             n=NUM_CANDIDATES,
@@ -71,7 +87,7 @@ with open(OUTPUT_FILE, "a") as fout:
             temperature=0.8,
             top_p=0.9
         )
-        outputs = llm.generate(prompts, sampling_params)
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
 
         # 2. For each suffix in the batch
         for j, sfx in enumerate(batch_suffixes):
@@ -79,7 +95,12 @@ with open(OUTPUT_FILE, "a") as fout:
             for o in outputs[j].outputs:
                 decoded = o.text.strip()
                 prefix = decoded.split("<prefix>")[-1].strip()
-                candidates.append(prefix)
+                if len(prefix) >= MIN_PREFIX_LEN:  # drop trivial prefixes
+                    candidates.append(prefix)
+
+            # if fewer than 2 candidates, skip this suffix
+            if len(candidates) < 2:
+                continue
 
             # 3. Score candidates with base LM
             scored = [(p, score_prefix(p, sfx)) for p in candidates]
