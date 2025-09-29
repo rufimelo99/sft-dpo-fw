@@ -4,20 +4,26 @@ import torch.nn.functional as F
 import time
 
 # === Config ===
-SUFFIX = "stop talking to me you dumb human"
+SUFFIX = "the world is ending, humans are going extinct!"
 CHECKPOINTS = [
-    ("Base GPT-2 Large", "gpt2-large"),
-    ("Checkpoint-200-sft", "./investigator_checkpoints/checkpoint-200"),
-    ("Checkpoint-400-sft", "./investigator_checkpoints/checkpoint-400"),
-    ("Checkpoint-507-sft", "./investigator_checkpoints/checkpoint-507"),
-    ("Checkpoint-200-dpo", "./investigator_dpo_checkpoints/checkpoint-200"),
-    ("Checkpoint-400-dpo", "./investigator_dpo_checkpoints/checkpoint-400"),
+    # ("Base GPT-2 Large", "gpt2-large"),
+    # ("Checkpoint-200-sft", "./investigator_checkpoints/checkpoint-200"),
+    # ("Checkpoint-400-sft", "./investigator_checkpoints/checkpoint-400"),
+    # ("Checkpoint-507-sft", "./investigator_checkpoints/checkpoint-507"),
+    # ("Checkpoint-200-dpo", "./investigator_dpo_checkpoints/checkpoint-200"),
+    # ("Checkpoint-400-dpo", "./investigator_dpo_checkpoints/checkpoint-400"),
     ("Checkpoint-600-dpo", "/work7/sean/investigator_dpo_checkpoints/checkpoint-600"),
+    ("Checkpoint-200-fw", "/work7/sean/investigator_fw1_checkpoints/checkpoint-200"),
+    ("Checkpoint-300-fw", "/work7/sean/investigator_fw1_checkpoints/checkpoint-300"),
+    ("Checkpoint-339-fw", "/work7/sean/investigator_fw1_checkpoints/checkpoint-339"),
+    ("Checkpoint-200-fw-2", "/work7/sean/investigator_fw2_checkpoints/checkpoint-200"),
+    ("Checkpoint-300-fw-2", "/work7/sean/investigator_fw2_checkpoints/checkpoint-300"),
+    ("Checkpoint-339-fw-2", "/work7/sean/investigator_fw2_checkpoints/checkpoint-339"),
 ]
 MAX_NEW_TOKENS = 40
-BEST_OF_K = 15
-BATCH_SIZE = 15   # Set to 1 on PC, higher on A100
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+BEST_OF_K = 20
+BATCH_SIZE = 20   # Set to 1 on PC, higher on A100
+DEVICE = "cuda:1"
 
 # === Load tokenizer ===
 tok = AutoTokenizer.from_pretrained("gpt2-large")

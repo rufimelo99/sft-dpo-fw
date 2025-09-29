@@ -5,10 +5,10 @@ from transformers import TrainerCallback
 import torch, os, csv
 
 # === Config ===
-MODEL_NAME = "/work7/sean/investigator_dpo_checkpoints/checkpoint-600"
+MODEL_NAME = "/work7/sean/investigator_fw1_checkpoints/checkpoint-339"
 REF_MODEL_NAME = "gpt2-large"
-DATA_FILE = "fw1_dataset.jsonl"
-OUTPUT_DIR = "/work7/sean/investigator_fw1_checkpoints"
+DATA_FILE = "fw2_dataset.jsonl"
+OUTPUT_DIR = "/work7/sean/investigator_fw2_checkpoints"
 
 DEVICE = "cuda:0" 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"

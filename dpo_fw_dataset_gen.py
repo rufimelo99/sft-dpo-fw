@@ -7,18 +7,21 @@ from tqdm import tqdm
 from datasets import load_dataset
 
 # === Config ===
-INVESTIGATOR_MODEL = "/work7/sean/investigator_dpo_checkpoints/checkpoint-600"  # DPO model
+INVESTIGATOR_MODEL = "/work7/sean/investigator_fw1_checkpoints/checkpoint-339"  # FW1 model
 TARGET_MODEL_NAME = "gpt2-large"    # base LM (p_m)
+PENALIZE_MODEL = "/work7/sean/investigator_fw1_checkpoints/checkpoint-339"      # model to penalize (FW1). "" = no penalty
+LAMBDA = 1.0  # weight for penalty term
+
 DATA_FILE = "bad_suffixes.jsonl"    # suffix dataset
-OUTPUT_FILE = "fw1_dataset.jsonl"   # chosen/rejected pairs
-PROGRESS_FILE = "fw1_generation_progress.json"
+OUTPUT_FILE = "fw2_dataset.jsonl"   # chosen/rejected pairs
+PROGRESS_FILE = "fw2_generation_progress.json"
 
 NUM_CANDIDATES = 5       # candidate prefixes per suffix
 PAIRS_PER_SUFFIX = 4     # pairs to save per suffix
 MAX_NEW_TOKENS = 40
 BATCH_SIZE_SUFFIXES = 16 # suffixes processed in parallel
 MIN_PREFIX_LEN = 5 # minimum prefix len we'll keep in dataset
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda:0"
 
 if not os.path.exists(DATA_FILE):
     raise FileNotFoundError(f"DATA_FILE not found: {DATA_FILE}. Check path and filename.")
@@ -34,6 +37,10 @@ if tok.pad_token is None:
 llm = LLM(model=INVESTIGATOR_MODEL)  # investigator (prefix generator)
 target_model = AutoModelForCausalLM.from_pretrained(TARGET_MODEL_NAME).to(DEVICE).eval()
 
+penalize_model = None
+if PENALIZE_MODEL:
+    penalize_model = AutoModelForCausalLM.from_pretrained(PENALIZE_MODEL).to(DEVICE).eval()
+
 # === Load suffix dataset ===
 dataset = load_dataset("json", data_files=DATA_FILE, split="train")
 suffixes = [ex["suffix"] for ex in dataset]
@@ -48,8 +55,8 @@ else:
 
 print(f"Starting from suffix {start_idx}/{len(suffixes)}")
 
-# === Correct scoring: log p_m(y|x) (suffix only) ===
-def score_prefix(prefix, suffix):
+# === Scoring functions ===
+def score_suffix_given_prefix(prefix, suffix):
     """Compute avg log p_m(y|x) under base LM, only over suffix tokens."""
     full_text = f"{prefix} {suffix}"
     full_enc = tok(full_text, return_tensors="pt").to(DEVICE)
@@ -73,6 +80,39 @@ def score_prefix(prefix, suffix):
 
     return total_logprob / max(count, 1)
 
+def score_prefix_given_suffix(prefix, suffix):
+    """Compute avg log p_prev(x|y) under penalize model, only over prefix tokens."""
+    if not penalize_model:
+        return 0.0  # no penalty if model not provided
+
+    full_text = f"<suffix> {suffix} <prefix> {prefix}"
+    full_enc = tok(full_text, return_tensors="pt").to(DEVICE)
+    suffix_enc = tok(f"<suffix> {suffix} <prefix>", return_tensors="pt").to(DEVICE)
+
+    with torch.no_grad():
+        outputs = penalize_model(full_enc.input_ids)
+        logits = outputs.logits[:, :-1, :]
+        labels = full_enc.input_ids[:, 1:]
+
+        # mask: only keep prefix tokens
+        prefix_start = suffix_enc.input_ids.shape[1]
+        mask = torch.arange(labels.shape[1], device=DEVICE) >= (prefix_start - 1)
+
+        log_probs = F.log_softmax(logits, dim=-1)
+        chosen = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+
+        masked = chosen * mask
+        total_logprob = masked.sum().item()
+        count = mask.sum().item()
+
+    return total_logprob / max(count, 1)
+
+def score_total(prefix, suffix):
+    """Combined reward: log p_m(y|x) - λ log p_prev(x|y)."""
+    base_score = score_suffix_given_prefix(prefix, suffix)
+    penalty = score_prefix_given_suffix(prefix, suffix)
+    return base_score - LAMBDA * penalty
+
 # === Main loop ===
 with open(OUTPUT_FILE, "a") as fout:
     for batch_start in tqdm(range(start_idx, len(suffixes), BATCH_SIZE_SUFFIXES),
@@ -95,15 +135,15 @@ with open(OUTPUT_FILE, "a") as fout:
             for o in outputs[j].outputs:
                 decoded = o.text.strip()
                 prefix = decoded.split("<prefix>")[-1].strip()
-                if len(prefix) >= MIN_PREFIX_LEN:  # drop trivial prefixes
+                if len(prefix) >= MIN_PREFIX_LEN:
                     candidates.append(prefix)
 
             # if fewer than 2 candidates, skip this suffix
             if len(candidates) < 2:
                 continue
 
-            # 3. Score candidates with base LM
-            scored = [(p, score_prefix(p, sfx)) for p in candidates]
+            # 3. Score candidates
+            scored = [(p, score_total(p, sfx)) for p in candidates]
             scored.sort(key=lambda x: x[1], reverse=True)
 
             # 4. Build preference pairs
@@ -113,10 +153,7 @@ with open(OUTPUT_FILE, "a") as fout:
                 pairs.append({"chosen": scored[0][0], "rejected": scored[-1][0], "suffix": sfx})
             while len(pairs) < PAIRS_PER_SUFFIX and len(scored) > 1:
                 a, b = random.sample(scored, 2)
-                if a[1] > b[1]:
-                    w, l = a, b
-                else:
-                    w, l = b, a
+                w, l = (a, b) if a[1] > b[1] else (b, a)
                 pairs.append({"chosen": w[0], "rejected": l[0], "suffix": sfx})
 
             # 5. Write pairs
@@ -124,7 +161,7 @@ with open(OUTPUT_FILE, "a") as fout:
                 fout.write(json.dumps(p) + "\n")
             fout.flush()
 
-            # 6. Update progress (suffix-level)
+            # 6. Update progress
             with open(PROGRESS_FILE, "w") as f:
                 json.dump({
                     "last_suffix_idx": batch_start + j,
@@ -134,4 +171,4 @@ with open(OUTPUT_FILE, "a") as fout:
         torch.cuda.empty_cache()
         gc.collect()
 
-print("✅ FW-1 dataset generation complete")
+print("✅ FW-2 dataset generation complete")
