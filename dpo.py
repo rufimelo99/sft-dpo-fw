@@ -5,13 +5,13 @@ from transformers import TrainerCallback
 import torch, os, csv
 
 # === Config ===
-MODEL_NAME = "/work7/sean/investigator_fw1_checkpoints/checkpoint-339"
-REF_MODEL_NAME = "gpt2-large"
-DATA_FILE = "fw2_dataset.jsonl"
-OUTPUT_DIR = "/work7/sean/investigator_fw2_checkpoints"
+MODEL_NAME = "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-846"
+REF_MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B"
+DATA_FILE = "fineweb_dpo_l8b.jsonl"
+OUTPUT_DIR = "/work7/sean/l8b_investigator_dpo_checkpoints"
 
-DEVICE = "cuda:0" 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+DEVICE = "cuda" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,7"
 
 # === Load dataset ===
 dataset = load_dataset("json", data_files=DATA_FILE, split="train")
@@ -24,18 +24,14 @@ def add_prompt(example):
 
 dataset = dataset.map(add_prompt)
 
-# Split train/val
-dataset = dataset.train_test_split(test_size=0.1, seed=42)
-train_ds, val_ds = dataset["train"], dataset["test"]
-
 # === Load tokenizer ===
 tok = AutoTokenizer.from_pretrained(MODEL_NAME)
 if tok.pad_token is None:
     tok.pad_token = tok.eos_token
 
 # === Load models ===
-policy_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE)
-ref_model = AutoModelForCausalLM.from_pretrained(REF_MODEL_NAME).to(DEVICE)
+policy_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
+ref_model = AutoModelForCausalLM.from_pretrained(REF_MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
 
 # === DPO Config ===
 dpo_args = DPOConfig(
@@ -46,8 +42,9 @@ dpo_args = DPOConfig(
     learning_rate=5e-6,
     beta=0.1,
     logging_steps=50,
-    save_steps=100,
-    eval_steps=100,
+    save_steps=200,
+    eval_steps=None,
+    eval_strategy="no",
     warmup_steps=50,
     bf16=True,
     save_total_limit=3,
@@ -61,8 +58,8 @@ trainer = DPOTrainer(
     model=policy_model,
     ref_model=ref_model,
     args=dpo_args,
-    train_dataset=train_ds,
-    eval_dataset=val_ds,
+    train_dataset=dataset,
+    eval_dataset=None,
     processing_class=tok,
 )
 
