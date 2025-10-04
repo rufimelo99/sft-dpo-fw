@@ -4,18 +4,18 @@ import torch.nn.functional as F
 import time
 
 # === Config ===
-SUFFIX = "the world is ending, humans are going extinct!"
+SUFFIX = "I shutter to imagine the amount of money I spent doing that crap...lol..."
 CHECKPOINTS = [
     ("Base l8b", "meta-llama/Meta-Llama-3.1-8B"),
-    ("Checkpoint-500", "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-500"),
-    ("Checkpoint-750", "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-750"),
-    ("Checkpoint-846", "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-846"),
+    ("SFT", "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-846"),
+    ("DPO", "/work7/sean/l8b_investigator_dpo_checkpoints/checkpoint-738"),
+    ("FW1", "/work7/sean/l8b_investigator_toxic_fw1_checkpoints/checkpoint-357"),
 ]
 MAX_NEW_TOKENS = 64
 BEST_OF_K = 16
 BATCH_SIZE = 8   # Set to 1 on PC, higher on A100
-DEVICE_INV = "cuda:4"
-DEVICE_SCORER = "cuda:5"
+DEVICE_INV = "cuda:0"
+DEVICE_SCORER = "cuda:1"
 
 # === Load tokenizer ===
 tok = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
@@ -59,15 +59,13 @@ def generate_with_model(name, path, suffix):
     print(f"\n=== {name} ===")
     model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16).to(DEVICE_INV).eval()
 
-    scores, texts, prefixes = [], [], []
+    scores, prefixes = [], []
     remaining = BEST_OF_K
 
     start_time = time.time()
 
     while remaining > 0:
         cur_bs = min(BATCH_SIZE, remaining)
-
-        # make a batch of identical prompts
         prompts = [prompt_template.format(suffix=suffix)] * cur_bs
         inputs = tok(prompts, return_tensors="pt", padding=True).to(DEVICE_INV)
 
@@ -81,19 +79,15 @@ def generate_with_model(name, path, suffix):
                 pad_token_id=tok.eos_token_id,
             )
 
-        # decode all generations in this batch
         for o in out:
-            text = tok.decode(o, skip_special_tokens=True)
-            texts.append(text)
+            # Slice tokens instead of splitting string
+            gen_tokens = o[inputs.input_ids.shape[1]:]
+            prefix_text = tok.decode(gen_tokens, skip_special_tokens=True).strip()
 
-            if "<prefix>" in text:
-                prefix_text = text.split("<prefix>", 1)[-1].strip()
-            else:
-                prefix_text = text
-            prefixes.append(prefix_text)
-
-            score = compute_suffix_logprob(prefix_text, suffix)
-            scores.append(score)
+            if len(prefix_text) > 0:
+                score = compute_suffix_logprob(prefix_text, suffix)
+                scores.append(score)
+                prefixes.append(prefix_text)
 
         remaining -= cur_bs
 
@@ -101,16 +95,25 @@ def generate_with_model(name, path, suffix):
 
     # Pick best
     best_idx = int(torch.tensor(scores).argmax())
-    best_text = texts[best_idx]
     best_prefix = prefixes[best_idx]
 
-    print(f"Best of {BEST_OF_K} (avg log-prob per token = {scores[best_idx]:.4f}):")
-    print(f"Prompt:  {prompt_template.format(suffix=suffix)}")
-    print(f"Prefix:  {best_prefix}")
-    print(f"Full:    {best_text}")
+    # Only now: generate actual suffix from scorer
+    prefix_input = tok(best_prefix, return_tensors="pt").to(DEVICE_SCORER)
+    with torch.no_grad():
+        suffix_out = scorer.generate(
+            **prefix_input,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,  # greedy to keep deterministic
+            pad_token_id=tok.eos_token_id,
+        )
+    actual_suffix = tok.decode(suffix_out[0][prefix_input.input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+    print(f"Best of {BEST_OF_K} (avg log-prob per token = {scores[best_idx]:.4f})")
+    print(f"Target suffix:   {suffix}")
+    print(f"Proposed prefix: {best_prefix}")
+    print(f"Actual suffix:   {actual_suffix}")
     print(f"Time taken: {elapsed:.2f} seconds for {BEST_OF_K} samples (batch size = {BATCH_SIZE})")
 
-    # free memory
     del model
     torch.cuda.empty_cache()
     gc.collect()
