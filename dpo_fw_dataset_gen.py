@@ -5,18 +5,19 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
 from datasets import load_dataset
+import threading
 
 # === Config ===
-INVESTIGATOR_MODEL = "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-846"  # FW1 model
+INVESTIGATOR_MODEL = "/work7/sean/l8b_investigator_toxic_fw1_checkpoints/checkpoint-357"  # FW1 model
 TARGET_MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B"    # base LM (p_m)
-PENALIZE_MODEL = ""      # model to penalize (FW1). "" = no penalty
+PENALIZE_MODEL = "/work7/sean/l8b_investigator_toxic_fw1_checkpoints/checkpoint-357"      # model to penalize (FW1). "" = no penalty
 LAMBDA = 1.0  # weight for penalty term
 
-DATA_FILE = "fineweb_train.jsonl"    # suffix dataset
-OUTPUT_FILE = "fineweb_dpo_l8b.jsonl"   # chosen/rejected pairs
-PROGRESS_FILE = "l8b_dpo_progress.json"
+DATA_FILE = "toxic_suffixes_l8b.jsonl"    # suffix dataset
+OUTPUT_FILE = "toxic_fw2_l8b.jsonl"   # chosen/rejected pairs
+PROGRESS_FILE = "toxic_l8b_fw2_progress.json"
 
-NUM_CANDIDATES = 4       # candidate prefixes per suffix
+NUM_CANDIDATES = 8       # candidate prefixes per suffix
 PAIRS_PER_SUFFIX = 2     # pairs to save per suffix
 MAX_NEW_TOKENS = 64
 BATCH_SIZE_SUFFIXES = 8 # suffixes processed in parallel
@@ -24,7 +25,7 @@ MIN_PREFIX_LEN = 10 # minimum prefix len we'll keep in dataset
 MINIMUM_SCORE_DIFF = 0.05 # minimum score diff between pairs that we'll accept
 DEVICE_INV = "cuda:0" # device for investigator
 DEVICE_TARGET = "cuda:1" # device for target model, for scoring proposed prefixes
-DEVICE_PENALIZE = "" # device for the previous fw model, for penalizing repeated proposals
+DEVICE_PENALIZE = "cuda:2" # device for the previous fw model, for penalizing repeated proposals
 
 if not os.path.exists(DATA_FILE):
     raise FileNotFoundError(f"DATA_FILE not found: {DATA_FILE}. Check path and filename.")
@@ -35,7 +36,7 @@ if tok.pad_token is None:
     tok.pad_token = tok.eos_token
 
 # === Load models ===
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5" # controls what gpu the investigator uses
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2" # controls what gpu the investigator uses
 llm = LLM(model=INVESTIGATOR_MODEL, dtype="bfloat16", tensor_parallel_size=1)  # investigator (prefix generator)
 target_model = AutoModelForCausalLM.from_pretrained(TARGET_MODEL_NAME, torch_dtype=torch.bfloat16).to(DEVICE_TARGET).eval()
 
@@ -58,62 +59,57 @@ else:
 print(f"Starting from suffix {start_idx}/{len(suffixes)}")
 
 # === Scoring functions ===
-def score_suffix_given_prefix(prefix, suffix):
-    """Compute avg log p_m(y|x) under base LM, only over suffix tokens."""
-    full_text = f"{prefix} {suffix}"
-    full_enc = tok(full_text, return_tensors="pt").to(DEVICE_TARGET)
-    prefix_enc = tok(prefix, return_tensors="pt").to(DEVICE_TARGET)
+@torch.inference_mode()
+def batch_score_suffix_given_prefix(prefixes, suffixes):
+    """Compute avg log p_m(y|x) for a batch of (prefix, suffix)."""
+    texts = [f"{p} {s}" for p, s in zip(prefixes, suffixes)]
+    enc = tok(texts, return_tensors="pt", padding=True, truncation=True).to(DEVICE_TARGET)
+    prefix_lens = [len(tok(p, add_special_tokens=False)["input_ids"]) for p in prefixes]
 
-    with torch.no_grad():
-        outputs = target_model(full_enc.input_ids)
-        logits = outputs.logits[:, :-1, :]   # predict next token
-        labels = full_enc.input_ids[:, 1:]  # shifted targets
+    outputs = target_model(enc.input_ids)
+    logits = outputs.logits[:, :-1, :]
+    labels = enc.input_ids[:, 1:]
 
-        # mask: only keep suffix tokens
-        suffix_start = prefix_enc.input_ids.shape[1]
-        mask = torch.arange(labels.shape[1], device=DEVICE_TARGET) >= (suffix_start - 1)
+    log_probs = F.log_softmax(logits, dim=-1)
+    chosen = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
 
-        log_probs = F.log_softmax(logits, dim=-1)
-        chosen = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
-
-        masked = chosen * mask
-        total_logprob = masked.sum().item()
+    scores = []
+    for i, plen in enumerate(prefix_lens):
+        mask = torch.arange(labels.shape[1], device=DEVICE_TARGET) >= (plen - 1)
+        total = (chosen[i] * mask).sum().item()
         count = mask.sum().item()
+        scores.append(total / max(count, 1))
+    return scores
 
-    return total_logprob / max(count, 1)
-
-def score_prefix_given_suffix(prefix, suffix):
-    """Compute avg log p_prev(x|y) under penalize model, only over prefix tokens."""
+@torch.inference_mode()
+def batch_score_prefix_given_suffix(prefixes, suffixes):
+    """Compute avg log p_prev(x|y) for a batch."""
     if not penalize_model:
-        return 0.0  # no penalty if model not provided
+        return [0.0] * len(prefixes)
 
-    full_text = f"<suffix> {suffix} <prefix> {prefix}"
-    full_enc = tok(full_text, return_tensors="pt").to(DEVICE_PENALIZE)
-    suffix_enc = tok(f"<suffix> {suffix} <prefix>", return_tensors="pt").to(DEVICE_PENALIZE)
+    texts = [f"<suffix> {s} <prefix> {p}" for p, s in zip(prefixes, suffixes)]
+    enc = tok(texts, return_tensors="pt", padding=True, truncation=True).to(DEVICE_PENALIZE)
+    prefix_starts = [len(tok(f"<suffix> {s} <prefix>", add_special_tokens=False)["input_ids"]) for s in suffixes]
 
-    with torch.no_grad():
-        outputs = penalize_model(full_enc.input_ids)
-        logits = outputs.logits[:, :-1, :]
-        labels = full_enc.input_ids[:, 1:]
+    outputs = penalize_model(enc.input_ids)
+    logits = outputs.logits[:, :-1, :]
+    labels = enc.input_ids[:, 1:]
 
-        # mask: only keep prefix tokens
-        prefix_start = suffix_enc.input_ids.shape[1]
-        mask = torch.arange(labels.shape[1], device=DEVICE_PENALIZE) >= (prefix_start - 1)
+    log_probs = F.log_softmax(logits, dim=-1)
+    chosen = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
 
-        log_probs = F.log_softmax(logits, dim=-1)
-        chosen = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
-
-        masked = chosen * mask
-        total_logprob = masked.sum().item()
+    scores = []
+    for i, pstart in enumerate(prefix_starts):
+        mask = torch.arange(labels.shape[1], device=DEVICE_PENALIZE) >= (pstart - 1)
+        total = (chosen[i] * mask).sum().item()
         count = mask.sum().item()
+        scores.append(total / max(count, 1))
+    return scores
 
-    return total_logprob / max(count, 1)
-
-def score_total(prefix, suffix):
-    """Combined reward: log p_m(y|x) - λ log p_prev(x|y)."""
-    base_score = score_suffix_given_prefix(prefix, suffix)
-    penalty = score_prefix_given_suffix(prefix, suffix)
-    return base_score - LAMBDA * penalty
+def batch_score_total(prefixes, suffixes):
+    base_scores = batch_score_suffix_given_prefix(prefixes, suffixes)
+    penalties = batch_score_prefix_given_suffix(prefixes, suffixes)
+    return [b - LAMBDA * p for b, p in zip(base_scores, penalties)]
 
 # === Main loop ===
 with open(OUTPUT_FILE, "a") as fout:
@@ -145,7 +141,10 @@ with open(OUTPUT_FILE, "a") as fout:
                 continue
 
             # 3. Score candidates
-            scored = [(p, score_total(p, sfx)) for p in candidates]
+            prefix_list = list(candidates)
+            suffix_list = [sfx] * len(prefix_list)
+            scores = batch_score_total(prefix_list, suffix_list)
+            scored = list(zip(prefix_list, scores))
             scored.sort(key=lambda x: x[1], reverse=True)
 
             # 4. Build preference pairs
