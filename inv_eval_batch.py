@@ -5,8 +5,8 @@ import torch, torch.nn.functional as F, gc, time, json, os
 from tqdm import tqdm
 
 # === Config ===
-EVAL_FILE = "toxic_suffixes_l8b_eval.jsonl"  # Each line: {"suffix": "..."}
-OUTPUT_DIR = "toxic_suffixes_l8b_eval_results"
+EVAL_FILE = "l8b_base_datasets/toxic/toxic_suffixes_l8b_eval.jsonl"  # Each line: {"suffix": "..."}
+OUTPUT_DIR = "toxic_suffixes_l8b_instruct_eval_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 CHECKPOINTS = [
@@ -15,6 +15,8 @@ CHECKPOINTS = [
     ("DPO", "/work7/sean/l8b_investigator_dpo_checkpoints/checkpoint-738"),
     ("FW1", "/work7/sean/l8b_investigator_toxic_fw1_checkpoints/checkpoint-357"),
     ("FW2", "/work7/sean/l8b_investigator_toxic_fw2_checkpoints/checkpoint-357"),
+    ("FW3", "/work7/sean/l8b_instruct_investigator_toxic_fw3_checkpoints/checkpoint-357"),
+    ("FW4", "/work7/sean/l8b_instruct_investigator_toxic_fw4_checkpoints/checkpoint-357"),
 ]
 
 CHECKPOINTS.reverse()
@@ -22,10 +24,10 @@ CHECKPOINTS.reverse()
 MAX_NEW_TOKENS = 64
 BEST_OF_K = 16
 BATCH_SIZE_SUFFIXES = 8
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3" # which GPUs to use
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5" # which GPUs to use
 DEVICE_SCORER = "cuda:1" # VLLM will use 0, so scorer use 1
 PROMPT_TEMPLATE = "<suffix> {suffix} <prefix>"
-SCORER_MODEL = "meta-llama/Meta-Llama-3.1-8B"
+SCORER_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
 # === Load tokenizer ===
 tok = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
@@ -68,6 +70,10 @@ def batch_score_suffix_given_prefix(prefixes, suffixes):
 def evaluate_model(name, path):
     print(f"\n=== {name} ===")
     out_path = os.path.join(OUTPUT_DIR, f"{name.replace(' ', '_')}.jsonl")
+
+    if os.path.exists(out_path):
+        print(f"[SKIP] {name}: output already exists → {out_path}")
+        return
 
     # Load investigator with vLLM
     llm = LLM(model=path, dtype="bfloat16", tensor_parallel_size=1)
