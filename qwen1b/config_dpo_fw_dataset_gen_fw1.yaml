@@ -13,5 +13,5 @@ min_prefix_len: 10
 minimum_score_diff: 0.05
 device_inv: "cuda:0"
 device_target: "cpu"
-device_penalize: "cuda:0"
+device_penalize: "cpu"
 quantise_target: false
