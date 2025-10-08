@@ -221,7 +221,9 @@ def generate_suffixes(
 
             # 1. Generate candidate prefixes for all suffixes with vLLM
             prompts = [f"<suffix> {s} <prefix>" for s in batch_suffixes]
-            input_ids = tokenizer(prompts, return_tensors="pt").to(llm_base.device)
+            input_ids = tokenizer(prompts, 
+                padding=True, truncation=True,
+                                  return_tensors="pt").to(llm_base.device)
 
             # equivalent sampling params
             outputs = llm_base.generate(
@@ -332,9 +334,10 @@ def main():
     )
 
     visible_devices = [device_inv, device_target, device_penalize]
+    visible_devices_idxs = []
     for i in range(len(visible_devices)):
         if visible_devices[i].startswith("cuda:"):
-            visible_devices[i] = visible_devices[i].replace("cuda:", "")
+            visible_devices_idxs.append(visible_devices[i].replace("cuda:", ""))
         elif visible_devices[i].startswith("cpu"):
             continue
         else:
@@ -343,8 +346,7 @@ def main():
                 device=visible_devices[i],
             )
             raise ValueError("Invalid device format.")
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(set(visible_devices))
-
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(set(visible_devices_idxs))
     if not os.path.exists(data_file):
         raise FileNotFoundError(
             f"DATA_FILE not found: {data_file}. Check path and filename."
