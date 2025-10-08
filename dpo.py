@@ -112,6 +112,11 @@ def dpo(model_name: str, ref_model_name: str, data_file: str, output_dir: str, u
         resume_from_checkpoint=latest_ckpt if latest_ckpt else None
     )
 
+    if use_peft:
+        # Save the PEFT model
+        logger.info("Saving PEFT model...")
+        policy_model.save_pretrained(os.path.join(output_dir, "lora_adapter"))
+
     # === Print summary of last metrics ===
     logger.info("Training finished.", train_result=train_result)
 
