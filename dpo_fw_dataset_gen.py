@@ -6,10 +6,9 @@ import os
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from peft import PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from vllm import LLM, SamplingParams
-from peft import PeftModel
 
 from logger import logger
 from utils import read_yaml_config
@@ -18,7 +17,7 @@ from utils import read_yaml_config
 # Frank-Wolfe model.
 INVESTIGATOR_MODEL = "/work7/sean/l8b_investigator_toxic_fw1_checkpoints/checkpoint-357"
 # Adapters path if using PEFT for investigator model.
-PEFT_INVESTIGATOR_MODEL_PATH = ""  
+PEFT_INVESTIGATOR_MODEL_PATH = ""
 # Base Language Model (p_m).
 TARGET_MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B"
 # Model to penalize. Note: "" = no penalty
@@ -79,7 +78,7 @@ def generate_suffixes(
     device_penalize,
     quantise_target,
     peft_investigator_model_path,
-    peft_penalize_model_path
+    peft_penalize_model_path,
 ):
     # === Load tokenizer ===
     tok = AutoTokenizer.from_pretrained(target_model_name)
@@ -87,15 +86,19 @@ def generate_suffixes(
         tok.pad_token = tok.eos_token
 
     # === Load models ===
-    llm = LLM(
-        model=investigator_model_name, dtype="bfloat16"
-    )  # investigator (prefix generator)
 
     if peft_investigator_model_path:
-        llm.model = PeftModel.from_pretrained(
-            llm.model, peft_investigator_model_path, torch_dtype=torch.bfloat16
+        llm_base = AutoModelForCausalLM.from_pretrained(
+            investigator_model_name, torch_dtype=torch.bfloat16
         )
-
+        llm_base = PeftModel.from_pretrained(
+            llm_base, peft_investigator_model_path, torch_dtype=torch.bfloat16
+        )
+    else:
+        llm_base = AutoModelForCausalLM.from_pretrained(
+            investigator_model_name, torch_dtype=torch.bfloat16
+        )
+    tokenizer = AutoTokenizer.from_pretrained(investigator_model_name, use_fast=True)
 
     bnb_config = BitsAndBytesConfig(
         # Load the model with 4-bit quantization
@@ -218,16 +221,26 @@ def generate_suffixes(
 
             # 1. Generate candidate prefixes for all suffixes with vLLM
             prompts = [f"<suffix> {s} <prefix>" for s in batch_suffixes]
-            sampling_params = SamplingParams(
-                n=num_candidates, max_tokens=max_new_tokens, temperature=1.1, top_p=0.95
+            input_ids = tokenizer(prompts, return_tensors="pt").to(llm_base.device)
+
+            # equivalent sampling params
+            outputs = llm_base.generate(
+                **input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=1.1,
+                top_p=0.95,
+                num_return_sequences=num_candidates,
+                pad_token_id=tokenizer.eos_token_id,
             )
-            outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+
+            outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
             # 2. For each suffix in the batch
             for j, sfx in enumerate(batch_suffixes):
                 candidates = set()
-                for o in outputs[j].outputs:
-                    decoded = o.text.strip()
+                for i in range(num_candidates):
+                    decoded = outputs[j * num_candidates + i].strip()
                     prefix = decoded.split("<prefix>")[-1].strip()
                     if len(prefix) >= min_prefix_len:
                         candidates.add(prefix)
@@ -311,8 +324,12 @@ def main():
     device_target = config.get("device_target", DEVICE_TARGET)
     device_penalize = config.get("device_penalize", DEVICE_PENALIZE)
     quantise_target = config.get("quantise_target", QUANTISE_TARGET)
-    peft_investigator_model_path = config.get("peft_investigator_model_path", PEFT_INVESTIGATOR_MODEL_PATH)
-    peft_penalize_model_path = config.get("peft_penalize_model_path", PEFT_PENALIZE_MODEL_PATH)
+    peft_investigator_model_path = config.get(
+        "peft_investigator_model_path", PEFT_INVESTIGATOR_MODEL_PATH
+    )
+    peft_penalize_model_path = config.get(
+        "peft_penalize_model_path", PEFT_PENALIZE_MODEL_PATH
+    )
 
     visible_devices = [device_inv, device_target, device_penalize]
     for i in range(len(visible_devices)):
@@ -354,7 +371,7 @@ def main():
         device_penalize,
         quantise_target,
         peft_investigator_model_path,
-        peft_penalize_model_path
+        peft_penalize_model_path,
     )
 
 
