@@ -14,3 +14,4 @@ minimum_score_diff: 0.05
 device_inv: "cuda:0"
 device_target: "cuda:0"
 device_penalize: "cuda:0"
+quantise_target: true
