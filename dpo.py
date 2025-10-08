@@ -5,9 +5,12 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import DPOConfig, DPOTrainer
+from peft import LoraConfig, get_peft_model
+
 
 from logger import logger
 from utils import CSVLoggerCallback, read_yaml_config
+
 
 # === Config ===
 MODEL_NAME = "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-846"
@@ -17,9 +20,10 @@ OUTPUT_DIR = "/work7/sean/l8b_investigator_dpo_checkpoints"
 
 DEVICE = "cuda"
 CUDA_VISIBLE_DEVICES = "4,5,7"
+USE_PEFT = False  # Whether to use PEFT (LoRA) or full fine-tuning
 
 
-def dpo(model_name: str, ref_model_name: str, data_file: str, output_dir: str):
+def dpo(model_name: str, ref_model_name: str, data_file: str, output_dir: str, use_peft: bool):
     """Trains a model using Direct Preference Optimization (DPO) on a given dataset."""
     # === Load dataset ===
     dataset = load_dataset("json", data_files=data_file, split="train")
@@ -45,11 +49,26 @@ def dpo(model_name: str, ref_model_name: str, data_file: str, output_dir: str):
         ref_model_name, torch_dtype=torch.bfloat16, device_map="auto"
     )
 
+    # === Apply PEFT (LoRA) if specified ===
+    if use_peft:
+        logger.info("Applying LoRA to the policy model.")
+        lora_config = LoraConfig(
+            r=16,                # rank of the LoRA adapters (tune as needed)
+            lora_alpha=32,       # scaling factor
+            target_modules=["q_proj", "v_proj"],  # common for LLaMA models
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        policy_model = get_peft_model(policy_model, lora_config)
+        policy_model.print_trainable_parameters()
+
+
     # === DPO Config ===
     dpo_args = DPOConfig(
         output_dir=output_dir,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
         num_train_epochs=3,
         learning_rate=5e-6,
         beta=0.1,
@@ -116,6 +135,7 @@ def main():
     data_file = config.get("data_file", DATA_FILE)
     output_dir = config.get("output_dir", OUTPUT_DIR)
     device = config.get("device", DEVICE)
+    use_peft = config.get("use_peft", USE_PEFT)
     os.environ["CUDA_VISIBLE_DEVICES"] = config.get(
         "cuda_visible_devices", CUDA_VISIBLE_DEVICES
     )
@@ -127,6 +147,7 @@ def main():
         ref_model_name=ref_model_name,
         data_file=data_file,
         output_dir=output_dir,
+        use_peft=use_peft
     )
 
 
