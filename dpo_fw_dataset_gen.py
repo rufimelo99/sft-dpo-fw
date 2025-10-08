@@ -353,6 +353,8 @@ def main():
         device_target,
         device_penalize,
         quantise_target,
+        peft_investigator_model_path,
+        peft_penalize_model_path
     )
 
 
