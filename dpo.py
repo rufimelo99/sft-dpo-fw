@@ -1,14 +1,13 @@
 import argparse
-import csv
 import os
 
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import DPOConfig, DPOTrainer
 
 from logger import logger
-from utils import read_yaml_config
+from utils import CSVLoggerCallback, read_yaml_config
 
 # === Config ===
 MODEL_NAME = "/work7/sean/l8b_investigator_sft_checkpoints/checkpoint-846"
@@ -18,35 +17,6 @@ OUTPUT_DIR = "/work7/sean/l8b_investigator_dpo_checkpoints"
 
 DEVICE = "cuda"
 CUDA_VISIBLE_DEVICES = "4,5,7"
-
-
-# === CSV Logger ===
-class CSVLoggerCallback(TrainerCallback):
-    def __init__(self, log_file):
-        self.log_file = log_file
-        self.header_written = False
-
-    def _write_logs(self, logs):
-        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
-        write_header = not os.path.exists(self.log_file) or not self.header_written
-        with open(self.log_file, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=logs.keys())
-            if write_header:
-                writer.writeheader()
-                self.header_written = True
-            writer.writerow(logs)
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs:
-            logs["step"] = state.global_step
-            logs["type"] = "train"
-            self._write_logs(logs)
-
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        if metrics:
-            metrics["step"] = state.global_step
-            metrics["type"] = "eval"
-            self._write_logs(metrics)
 
 
 def dpo(model_name: str, ref_model_name: str, data_file: str, output_dir: str):
@@ -105,15 +75,15 @@ def dpo(model_name: str, ref_model_name: str, data_file: str, output_dir: str):
         processing_class=tok,
     )
 
-    metrics_file = os.path.join(OUTPUT_DIR, "training_metrics.csv")
+    metrics_file = os.path.join(output_dir, "training_metrics.csv")
     trainer.add_callback(CSVLoggerCallback(metrics_file))
 
     # === Resume logic ===
     latest_ckpt = None
-    if os.path.isdir(OUTPUT_DIR):
+    if os.path.isdir(output_dir):
         ckpts = [
-            os.path.join(OUTPUT_DIR, d)
-            for d in os.listdir(OUTPUT_DIR)
+            os.path.join(output_dir, d)
+            for d in os.listdir(output_dir)
             if d.startswith("checkpoint-")
         ]
         if ckpts:
