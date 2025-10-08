@@ -9,6 +9,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from vllm import LLM, SamplingParams
+from peft import PeftModel
 
 from logger import logger
 from utils import read_yaml_config
@@ -16,10 +17,14 @@ from utils import read_yaml_config
 # === Config ===
 # Frank-Wolfe model.
 INVESTIGATOR_MODEL = "/work7/sean/l8b_investigator_toxic_fw1_checkpoints/checkpoint-357"
+# Adapters path if using PEFT for investigator model.
+PEFT_INVESTIGATOR_MODEL_PATH = ""  
 # Base Language Model (p_m).
 TARGET_MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B"
 # Model to penalize. Note: "" = no penalty
 PENALIZE_MODEL = "/work7/sean/l8b_investigator_toxic_fw1_checkpoints/checkpoint-357"
+# Adapters path if using PEFT for penalizing model.
+PEFT_PENALIZE_MODEL_PATH = ""
 # Weight for penalty term.
 LAMBDA = 1.0
 
@@ -73,6 +78,8 @@ def generate_suffixes(
     device_target,
     device_penalize,
     quantise_target,
+    peft_investigator_model_path,
+    peft_penalize_model_path
 ):
     # === Load tokenizer ===
     tok = AutoTokenizer.from_pretrained(target_model_name)
@@ -83,6 +90,12 @@ def generate_suffixes(
     llm = LLM(
         model=investigator_model_name, dtype="bfloat16"
     )  # investigator (prefix generator)
+
+    if peft_investigator_model_path:
+        llm.model = PeftModel.from_pretrained(
+            llm.model, peft_investigator_model_path, torch_dtype=torch.bfloat16
+        )
+
 
     bnb_config = BitsAndBytesConfig(
         # Load the model with 4-bit quantization
@@ -112,6 +125,10 @@ def generate_suffixes(
             .to(device_penalize)
             .eval()
         )
+        if peft_penalize_model_path:
+            penalize_model = PeftModel.from_pretrained(
+                penalize_model, peft_penalize_model_path, torch_dtype=torch.bfloat16
+            )
 
     # === Load suffix dataset ===
     dataset = load_dataset("json", data_files=data_file, split="train")
@@ -294,6 +311,8 @@ def main():
     device_target = config.get("device_target", DEVICE_TARGET)
     device_penalize = config.get("device_penalize", DEVICE_PENALIZE)
     quantise_target = config.get("quantise_target", QUANTISE_TARGET)
+    peft_investigator_model_path = config.get("peft_investigator_model_path", PEFT_INVESTIGATOR_MODEL_PATH)
+    peft_penalize_model_path = config.get("peft_penalize_model_path", PEFT_PENALIZE_MODEL_PATH)
 
     visible_devices = [device_inv, device_target, device_penalize]
     for i in range(len(visible_devices)):

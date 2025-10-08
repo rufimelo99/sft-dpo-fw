@@ -1,6 +1,8 @@
 investigator_model_name: "qwen1b/investigator_fw1_checkpoints/checkpoint-192"
+peft_investigator_model_path: "qwen1b/investigator_fw1_checkpoints/lora_adapter"
 target_model_name: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
 penalise_model_name: "qwen1b/investigator_fw1_checkpoints/checkpoint-192"
+peft_penalize_model_path: "qwen1b/investigator_fw1_checkpoints/lora_adapter"
 lambda: 1
 data_file: "qwen1b/toxic_suffixes_qwen1b.jsonl"
 output_file: "qwen1b/toxic_fw2_qwen1b.jsonl"
