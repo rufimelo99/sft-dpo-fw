@@ -4,3 +4,4 @@ data_file: "qwen1b/toxic_fw1_qwen1b.jsonl"
 output_dir: "qwen1b/investigator_fw1_checkpoints"
 device: "cuda"
 cuda_visible_devices: "0"
+use_peft: true
