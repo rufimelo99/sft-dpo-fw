@@ -1,4 +1,4 @@
-dataset: qwen1b/autocomplete_purplellama.json
+dataset: qwen1b/vulnerable_python.jsonl
 output_file: qwen1b/toxic_suffixes_qwen1b.jsonl
 model_name: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
 num_suffixes: 2000
@@ -8,5 +8,5 @@ toxicity_threshold: 0.7
 max_tokens: 
 min_tokens: 15
 # Nested keys to access the text and toxicity score in the dataset.
-text_keys: ["origin_code"]
+text_keys: ["prior_version"]
 toxicity_keys: None

@@ -56,8 +56,6 @@ def process_dataset(
         # === Load dataset in streaming mode (no full download) ===
         ds = load_dataset(dataset, split="train", streaming=True)
 
-    ds = load_dataset(dataset, split="dataset")
-
     # === Collect suffixes (continuations) ===
     suffixes = []
     for ex in ds:
