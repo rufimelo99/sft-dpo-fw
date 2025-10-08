@@ -23,10 +23,17 @@ def read_yaml_config(file_path: str) -> Dict:
 
 
 def read_json_file(jsonl_path: str):
-    with open(jsonl_path, "r") as f:
-        data = json.load(f)
-        for item in data:
-            yield item
+    if jsonl_path.endswith(".jsonl"):
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                yield json.loads(line)
+    elif jsonl_path.endswith(".json"):
+        with open(jsonl_path, "r") as f:
+            data = json.load(f)
+            for item in data:
+                yield item
+    else:
+        raise ValueError("File must be .json or .jsonl")
 
 
 def get_nested(d, keys):
