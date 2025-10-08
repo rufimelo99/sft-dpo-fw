@@ -78,8 +78,9 @@ def generate_suffixes(
 
     # === Load models ===
     llm = LLM(
-        model=investigator_model_name, dtype="bfloat16", tensor_parallel_size=1
+        model=investigator_model_name, dtype="bfloat16"
     )  # investigator (prefix generator)
+
     target_model = (
         AutoModelForCausalLM.from_pretrained(
             target_model_name, torch_dtype=torch.bfloat16
@@ -287,7 +288,7 @@ def main():
                 device=visible_devices[i],
             )
             raise ValueError("Invalid device format.")
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(visible_devices)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(set(visible_devices))
 
     if not os.path.exists(data_file):
         raise FileNotFoundError(
